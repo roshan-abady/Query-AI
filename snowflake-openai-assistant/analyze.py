@@ -33,7 +33,7 @@ def get_table_schema(sql_query_tool, db_schema=None):
         """
 
     # Execute the SQL query and store the results in a DataFrame
-    df = sql_query_tool.execute_sql_query(sql_query, limit=None)
+    df = sql_query_tool.execute_sql_query(sql_query, limit=100)
     print(df)
     output = []
     # Initialize variables to store table and column information
@@ -67,6 +67,9 @@ def get_table_schema(sql_query_tool, db_schema=None):
     output = "\n ".join(output)
     return output
 
+max_response_tokens = 1500
+token_limit = 6000
+temperature = 0.2
 
 class ChatGPT_Handler:  # designed for chat completion API
     def __init__(
@@ -84,6 +87,10 @@ class ChatGPT_Handler:  # designed for chat completion API
         self.extract_patterns = extract_patterns
 
     def _call_llm(self, prompt, stop):
+        # Limit the size of the prompt
+        if len(prompt) > token_limit:
+            prompt = prompt[-token_limit:]
+
         response = openai.ChatCompletion.create(
             engine=self.gpt_deployment,
             messages=prompt,
@@ -93,6 +100,12 @@ class ChatGPT_Handler:  # designed for chat completion API
         )
 
         llm_output = response["choices"][0]["message"]["content"]
+
+        # Check the length of the llm_output
+        if len(llm_output) > max_response_tokens:
+            # If the llm_output is too long, truncate it
+            llm_output = llm_output[:max_response_tokens]
+
         return llm_output
 
     def extract_output(self, text_input):
@@ -166,7 +179,7 @@ class SQL_Query(ChatGPT_Handler):
         self.db_warehouse = db_warehouse
 
     def execute_sql_query(self, query, limit=10000):
-        connection_string = f"snowflake://{self.db_user}:{self.db_password}@{self.account_identifier}/{self.db_name}/{self.db_schema}?warehouse={self.db_warehouse}&role={self.db_role}"
+        connection_string = f"snowflake://{self.db_user}:''@{self.account_identifier}/{self.db_name}/{self.db_schema}?warehouse={self.db_warehouse}&role={self.db_role}&authenticator=externalbrowser"
         engine = create_engine(connection_string)
 
         result = pd.read_sql_query(query, engine)

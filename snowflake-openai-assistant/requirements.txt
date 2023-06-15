@@ -10,3 +10,6 @@ pyarrow==10.0.1
 scikit-learn
 pmdarima
 matplotlib
+snowflake-connector-python
+boto3
+snowflake-snowpark-python

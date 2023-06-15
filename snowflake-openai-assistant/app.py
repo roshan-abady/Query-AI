@@ -9,6 +9,13 @@ from pathlib import Path
 from dotenv import load_dotenv
 import os
 import datetime
+import pickle
+
+# Load environment variables
+load_dotenv('secrets.env')
+
+# Path to the pickle file where inputs will be saved
+pickle_file_path = Path(".") / "inputs.pickle"
 
 # Only load the settings if they are running local and not in Azure
 if os.getenv("WEBSITE_SITE_NAME") is None:
@@ -21,25 +28,39 @@ def load_setting(setting_name, session_name, default_value=""):
     Function to load the setting information from session
     """
     if session_name not in st.session_state:
-        if os.environ.get(setting_name) is not None:
-            st.session_state[session_name] = os.environ.get(setting_name)
+        # Try to load the value from the environment
+        value = os.environ.get(setting_name)
+        if value is not None:
+            st.session_state[session_name] = value
         else:
-            st.session_state[session_name] = default_value
+            # Try to load the value from the pickle file
+            if pickle_file_path.exists():
+                with open(pickle_file_path, 'rb') as f:
+                    saved_inputs = pickle.load(f)
+                    if session_name in saved_inputs:
+                        st.session_state[session_name] = saved_inputs[session_name]
+            else:
+                st.session_state[session_name] = default_value
 
+def save_inputs():
+    """
+    Function to save the inputs to a pickle file
+    """
+    inputs = {name: value for name, value in st.session_state.items()}
+    with open(pickle_file_path, 'wb') as f:
+        pickle.dump(inputs, f)
 
 load_setting("AZURE_OPENAI_CHATGPT_DEPLOYMENT", "chatgpt", "gpt-35-turbo")
-load_setting("AZURE_OPENAI_GPT4_DEPLOYMENT", "gpt4", "gpt-35-turbo")
-load_setting(
-    "AZURE_OPENAI_ENDPOINT", "endpoint", "https://resourcenamehere.openai.azure.com/"
-)
-load_setting("AZURE_OPENAI_API_KEY", "apikey")
-load_setting("SNOW_ACCOUNT", "snowaccount")
-load_setting("SNOW_USER", "snowuser")
-load_setting("SNOW_PASSWORD", "snowpassword")
-load_setting("SNOW_ROLE", "snowrole")
-load_setting("SNOW_DATABASE", "snowdatabase")
-load_setting("SNOW_SCHEMA", "snowschema")
-load_setting("SNOW_WAREHOUSE", "snowwarehouse")
+load_setting("AZURE_OPENAI_GPT4_DEPLOYMENT", "gpt4", "gpt-4-32k")
+load_setting("AZURE_OPENAI_ENDPOINT", "endpoint", os.getenv("AZURE_OPENAI_ENDPOINT"))
+load_setting("AZURE_OPENAI_API_KEY", "apikey", os.environ.get("AZURE_OPENAI_API_KEY"))
+load_setting("SNOW_ACCOUNT", "snowaccount", os.environ.get("SNOW_ACCOUNT"))
+load_setting("SNOW_USER", "snowuser",os.environ.get("SNOW_USER"))
+load_setting("SNOW_PASSWORD", "snowpassword", os.environ.get("SNOW_PASSWORD"))
+load_setting("SNOW_ROLE", "snowrole",os.environ.get("SNOW_ROLE"))
+load_setting("SNOW_DATABASE", "snowdatabase",os.environ.get("SNOW_DATABASE"))
+load_setting("SNOW_SCHEMA", "snowschema",os.environ.get("SNOW_SCHEMA"))
+load_setting("SNOW_WAREHOUSE", "snowwarehouse",os.environ.get("SNOW_WAREHOUSE"))
 
 if "show_settings" not in st.session_state:
     st.session_state["show_settings"] = False
@@ -75,7 +96,7 @@ token_limit = 6000
 temperature = 0.2
 
 st.set_page_config(
-    page_title="Snowflake OpenAI Assistant", page_icon=":chart:", layout="wide"
+    page_title="SnoWyse", page_icon=":chart:", layout="wide"
 )
 
 st.markdown(
@@ -86,14 +107,15 @@ st.markdown(
 st.markdown(
     """
 <nav class="navbar fixed-top navbar-expand-lg navbar-dark" style="background-color: #3498DB;">
-  <p class="navbar-brand" >Snowflake OpenAI Assistant</p>
+  <p class="navbar-brand" >SnoWyse</p>
 </nav>
 """,
     unsafe_allow_html=True,
 )
 
 st.markdown(
-    """# **Snowflake OpenAI Assistant**
+    """# **SnoWyse**
+    Snowflake OpenAI Assistant
 This is an experimental assistant that requires Azure OpenAI access. The app demonstrates the use of OpenAI to support getting insights from Snowflake by just asking questions. The assistant can also generate SQL and Python code for the Questions.
 """
 )
