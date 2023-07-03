@@ -13,27 +13,40 @@ from sqlalchemy import create_engine
 import sqlalchemy as sql
 from plotly.graph_objects import Figure
 import time
+from transformers import GPT2Tokenizer
+from tiktoken import Tokenizer
+from tiktoken.models import Model
 
+db_schema = os.getenv("SNOW_SCHEMA")
+db_warehouse = os.getenv("SNOW_WAREHOUSE")
+# Select an active warehouse as OPERATIONS_ANALYTICS_WAREHOUSE_PROD
+db_warehouse = "OPERATIONS_ANALYTICS_WAREHOUSE_PROD"
 
-def get_table_schema(sql_query_tool, db_schema=None):
+def get_table_schema(sql_query_tool, db_table=None):
     # Define the SQL query to retrieve table and column information
-    if db_schema is not None:
-        sql_query = f"""  
-        SELECT C.TABLE_NAME, C.COLUMN_NAME, C.DATA_TYPE, T.TABLE_TYPE, T.TABLE_SCHEMA  
-        FROM INFORMATION_SCHEMA.COLUMNS C  
-        JOIN INFORMATION_SCHEMA.TABLES T ON C.TABLE_NAME = T.TABLE_NAME AND C.TABLE_SCHEMA = T.TABLE_SCHEMA  
-        WHERE T.TABLE_SCHEMA = '{db_schema}';
+    # rmoved  T.TABLE_TYPE, T.TABLE_SCHEMA to increase efficiency
+    if db_table is not None:
+        sql_query = f"""
+        SELECT C.TABLE_NAME, C.COLUMN_NAME, C.DATA_TYPE, T.TABLE_TYPE, T.TABLE_SCHEMA
+        FROM INFORMATION_SCHEMA.COLUMNS C
+        JOIN INFORMATION_SCHEMA.TABLES T ON C.TABLE_NAME = T.TABLE_NAME AND C.TABLE_SCHEMA = T.TABLE_SCHEMA
+        WHERE T.TABLE_SCHEMA = '{db_schema}'
+        AND T.TABLE_NAME IN ('V_COMBINED_ARR_LOAD_TABLE','MFD_OUTCOMES')
+        QUALIFY ROW_NUMBER() OVER (PARTITION BY C.TABLE_NAME, C.COLUMN_NAME ORDER BY C.TABLE_NAME) = 1;
         """
     else:
-        sql_query = f"""  
-        SELECT C.TABLE_NAME, C.COLUMN_NAME, C.DATA_TYPE, T.TABLE_TYPE, T.TABLE_SCHEMA  
-        FROM INFORMATION_SCHEMA.COLUMNS C  
-        JOIN INFORMATION_SCHEMA.TABLES T ON C.TABLE_NAME = T.TABLE_NAME AND C.TABLE_SCHEMA = T.TABLE_SCHEMA  
-        WHERE T.TABLE_SCHEMA != 'INFORMATION_SCHEMA';
+        sql_query = f"""
+        SELECT C.TABLE_NAME, C.COLUMN_NAME, C.DATA_TYPE
+        FROM OPERATIONS_ANALYTICS.INFORMATION_SCHEMA.COLUMNS C
+        JOIN OPERATIONS_ANALYTICS.INFORMATION_SCHEMA.TABLES T
+        ON C.TABLE_NAME = T.TABLE_NAME
+        WHERE T.TABLE_SCHEMA = 'TRANSFORMED_PROD'
+        AND T.TABLE_NAME IN ('V_COMBINED_ARR_LOAD_TABLE','MFD_OUTCOMES')
+        QUALIFY ROW_NUMBER() OVER (PARTITION BY C.TABLE_NAME, C.COLUMN_NAME ORDER BY C.TABLE_NAME) = 1;
         """
 
     # Execute the SQL query and store the results in a DataFrame
-    df = sql_query_tool.execute_sql_query(sql_query, limit=100)
+    df = sql_query_tool.execute_sql_query(sql_query, limit=1000)
     print(df)
     output = []
     # Initialize variables to store table and column information
@@ -67,9 +80,12 @@ def get_table_schema(sql_query_tool, db_schema=None):
     output = "\n ".join(output)
     return output
 
-max_response_tokens = 1500
-token_limit = 6000
-temperature = 0.2
+temperature = 0.25
+max_response_tokens = 3500
+token_limit = 1000
+top_p=0.95
+frequency_penalty=0
+presence_penalty=0
 
 class ChatGPT_Handler:  # designed for chat completion API
     def __init__(
@@ -85,29 +101,56 @@ class ChatGPT_Handler:  # designed for chat completion API
         self.gpt_deployment = gpt_deployment
         self.temperature = temperature
         self.extract_patterns = extract_patterns
+        self.tokenizer = GPT2Tokenizer.from_pretrained('gpt2')
 
     def _call_llm(self, prompt, stop):
-        # Limit the size of the prompt
-        if len(prompt) > token_limit:
-            prompt = prompt[-token_limit:]
+        # Chunk the prompt
+        chunks = self._chunk_text(prompt, self.token_limit)
 
-        response = openai.ChatCompletion.create(
-            engine=self.gpt_deployment,
-            messages=prompt,
-            temperature=self.temperature,
-            max_tokens=self.max_response_tokens,
-            stop=stop,
-        )
+        llm_output = ""
 
-        llm_output = response["choices"][0]["message"]["content"]
+        for chunk in chunks:
+            # Call the model with each chunk
+            response = openai.ChatCompletion.create(
+                engine=self.gpt_deployment,
+                messages=chunk,
+                temperature=self.temperature,
+                max_tokens=self.max_response_tokens,
+                stop=stop,
+            )
+
+            # Concatenate the responses
+            llm_output += response["choices"][0]["message"]["content"]
 
         # Check the length of the llm_output
-        if len(llm_output) > max_response_tokens:
+        if len(llm_output) > self.max_response_tokens:
             # If the llm_output is too long, truncate it
-            llm_output = llm_output[:max_response_tokens]
-
+            llm_output = llm_output[:self.max_response_tokens]
         return llm_output
+    def _chunk_text(self, text, max_length):
+        # Tokenize the text
+        tokens = self.tokenizer.encode(text)
 
+        # Initialize a list to hold the chunks
+        chunks = []
+
+        # While there are still tokens to be processed
+        while tokens:
+            # If the number of tokens is less than the maximum length
+            if len(tokens) <= max_length:
+                # Add the tokens to the chunks and break the loop
+                chunks.append(tokens)
+                break
+            else:
+                # Otherwise, split the tokens into a chunk and the rest
+                chunk, tokens = tokens[:max_length], tokens[max_length:]
+                # Add the chunk to the chunks
+                chunks.append(chunk)
+
+        # Convert the chunks back into text
+        chunks = [self.tokenizer.decode(chunk) for chunk in chunks]
+
+        return chunks
     def extract_output(self, text_input):
         output = {}
         if len(text_input) == 0:
@@ -150,17 +193,17 @@ class ChatGPT_Handler:  # designed for chat completion API
 
 class SQL_Query(ChatGPT_Handler):
     def __init__(
-        self,
-        system_message="",
-        data_sources="",
-        account_identifier=None,
-        db_user=None,
-        db_password=None,
-        db_role=None,
-        db_name=None,
-        db_schema=None,
-        db_warehouse=None,
-        **kwargs,
+            self,
+            system_message="",
+            data_sources="",
+            account_identifier=os.getenv("SNOW_ACCOUNT"),
+            db_user=os.getenv("SNOW_USER"),
+            db_password=os.getenv("SNOW_PASSWORD"),
+            db_role=os.getenv("SNOW_ROLE"),
+            db_name=os.getenv("SNOW_DATABASE"),
+            db_schema=os.getenv("SNOW_SCHEMA"),
+            db_warehouse=os.getenv("SNOW_WAREHOUSE"),
+            **kwargs,
     ):
         super().__init__(**kwargs)
         if len(system_message) > 0:
@@ -168,21 +211,20 @@ class SQL_Query(ChatGPT_Handler):
             {data_sources}
             {system_message}
             """
-        self.account_identifier = account_identifier
-        self.db_user = db_user
-        self.db_password = parse.quote(db_password)
-        self.db_role = db_role
-        self.db_name = db_name
-        self.db_role = db_role
-        self.db_name = db_name
-        self.db_schema = db_schema
-        self.db_warehouse = db_warehouse
+        connection_string = f"snowflake://{db_user}:{parse.quote(db_password)}@{account_identifier}/{db_name}/{db_schema}?warehouse={db_warehouse}&role={db_role}&authenticator=externalbrowser"
+        self.engine = create_engine(connection_string)
 
     def execute_sql_query(self, query, limit=10000):
-        connection_string = f"snowflake://{self.db_user}:''@{self.account_identifier}/{self.db_name}/{self.db_schema}?warehouse={self.db_warehouse}&role={self.db_role}&authenticator=externalbrowser"
-        engine = create_engine(connection_string)
-
-        result = pd.read_sql_query(query, engine)
+        """
+        Executes a SQL query using the Snowflake database connection defined in the object.
+        :param query: The SQL query to execute.
+        :type query: str
+        :param limit: The maximum number of rows to return. Default is 10000.
+        :type limit: int
+        :return: A pandas dataframe with the results of the query.
+        :rtype: pandas.core.frame.DataFrame
+        """
+        result = pd.read_sql_query(query, self.engine)
         result = result.infer_objects()
         for col in result.columns:
             if "date" in col.lower():
@@ -193,6 +235,8 @@ class SQL_Query(ChatGPT_Handler):
 
         return result
 
+    def close_connection(self):
+        self.engine.dispose()
 
 class AnalyzeGPT(ChatGPT_Handler):
     def __init__(
